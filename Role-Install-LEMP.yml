@@ -1,0 +1,371 @@
+---
+- hosts: web
+  become: yes
+
+  vars:
+    mysql_new_dump_name: "/tmp/{{ ansible_date_time.iso8601_basic }}-dump-{{ mysql_db_name }}.sql"
+    mysql_database_list: []
+    nginx_conf: "/etc/nginx/nginx.conf"
+    nginx_web_root: "/var/www/{{ global_servers['main_web_server']['subdomain'] }}.{{ global_domain }}"
+    nginx_log_root: "/var/log/nginx/{{ global_servers['main_web_server']['subdomain'] }}.{{ global_domain }}"
+    nginx_conf_indent: "        "
+    nginx_conf_tab: "       "
+    php_conf: "/etc/php-fpm.d/www.conf"
+    
+  vars_files:
+    - Vars-DB-Creds.yml
+    - global_vars.yml
+    
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+    - name: restart php
+      service:
+        name: php-fpm
+        state: restarted
+    - name: restart firewall
+      service:
+        name: firewalld
+        state: restarted
+    - name: restore context
+      shell:
+        cmd: "restorecon -Rv {{ nginx_web_root }}/"
+      notify: restart nginx
+
+  tasks:
+    - name: INSTALL - Nginx, MariaDB, PHP packages, and tool for managing SELinux
+      dnf:
+        name: "{{ item.pkg }}"
+        state: present
+      with_items:
+        - pkg: "nginx"
+        - pkg: "mariadb-server"
+        - pkg: "mariadb"
+        - pkg: "python3-PyMySQL"
+        - pkg: "php"
+        - pkg: "php-mysqlnd"
+        - pkg: "php-fpm"
+        - pkg: "php-opcache"
+        - pkg: "php-gd"
+        - pkg: "php-xml"
+        - pkg: "php-mbstring"
+        - pkg: "policycoreutils-python-utils"
+        
+    - name: MARIADB - enable and start mariadb service
+      service:
+        name: mariadb
+        state: started
+        enabled: true
+        
+    - name: MARIADB - Set root password
+      mysql_user:
+        name: root
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/lib/mysql/mysql.sock
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: MARIADB - Create my admin user
+      mysql_user:
+        name: "{{ global_admin_username }}"
+        password: "{{ mysql_admin_password }}"
+        host: "{{ mysql_db_host }}"
+        state: present
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: MARIADB - Set root password
+      mysql_user:
+        name: root
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/lib/mysql/mysql.sock
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+
+    - name: mysql_secure_installation - Remove anonymous user
+      mysql_user:
+        name: ""
+        host: "{{ mysql_db_host }}"
+        state: absent
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: mysql_secure_installation - Remove test DB
+      mysql_db:
+        db: test
+        state: absent
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: mysql_secure_installation - Remove hostname based user
+      mysql_user:
+        name: root
+        host: "{{ ansible_nodename }}"
+        state: absent
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: MARIADB - Get list of current databases
+      mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        query: "SHOW databases;"
+      register: mysql_databases
+      changed_when: no
+      
+    - name: Convert output from database query to a list
+      set_fact:
+        mysql_database_list: "{{ mysql_database_list + [item['Database']] }}"
+      loop: "{{ mysql_databases['query_result'][0] }}"
+      changed_when: no
+        
+    - name: Create backup of database if it exists
+      block:
+        - name: MARIADB - Create dump of old database
+          mysql_db:
+            db: "{{ mysql_db_name }}"
+            state: dump
+            target: "{{ mysql_new_dump_name }}"
+            check_implicit_admin: yes
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_host: "{{ mysql_db_host }}"
+        
+        - name: MARIADB - Copy new dump file from server to local
+          fetch:
+            src: "{{ mysql_new_dump_name }}"
+            dest: "{{ global_mysql_new_dump_local_storage }}"
+            
+        - name: MARIADB - Delete new dump
+          file:
+            path: "{{ mysql_new_dump_name }}"
+            state: absent
+            
+        - name: MARIADB - Delete current database
+          mysql_db:
+            db: "{{ mysql_db_name }}"
+            state: absent
+            check_implicit_admin: yes
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_host: "{{ mysql_db_host }}"
+      when: mysql_db_name | string in mysql_database_list
+      
+    - name: MARIADB - Create new database
+      mysql_db:
+        db: "{{ mysql_db_name }}"
+        state: present
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: MARIADB - Copy dump file from local to server. Put in /tmp
+      copy:
+        src: "{{ global_mysql_dump_file_local_path }}"
+        dest: "/tmp/"
+        
+    - name: MARIADB - Import dump
+      mysql_db:
+        db: "{{ mysql_db_name }}"
+        state: import
+        target: "/tmp/{{ global_mysql_dump_file }}"
+        force: true
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: MARIADB - Delete dump file in /tmp
+      file:
+        path: "/tmp/{{ global_mysql_dump_file }}"
+        state: absent
+        
+    - name: MARIADB - Create view-only user
+      mysql_user:
+        name: "{{ mysql_user_name }}"
+        password: "{{ mysql_user_password }}"
+        priv: "{{ mysql_db_name }}.*:SELECT"
+        host: "{{ mysql_db_host }}"
+        state: present
+        check_implicit_admin: yes
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_host: "{{ mysql_db_host }}"
+        
+    - name: NGINX - Create root dir for domain
+      file:
+        path: "{{ nginx_web_root }}/"
+        state: directory
+        mode: 0755
+        owner: root
+        group: root
+      notify: restart nginx
+        
+    - name: NGINX - Create log dir for domain
+      file:
+        path: "{{ nginx_log_root }}/"
+        state: directory
+        mode: 0755
+        owner: root
+        group: root
+      notify: restart nginx
+    
+    - name: SELINUX - Set httpd_sys_content_t for nginx_web_root
+      sefcontext:
+        target: "{{ nginx_web_root }}(/.*)?"
+        ftype: a
+        setype: httpd_sys_content_t
+      notify: restore context
+        
+    - name: NGINX CONF - Disable IPv6
+      lineinfile:
+        path: "{{ nginx_conf }}"
+        regex: "^[ ]*listen[ ]*[[]::[]]:80;$"
+        line: "{{ nginx_conf_indent }}#listen{{ nginx_conf_tab }}[::]:80;"
+        state: present
+        firstmatch: true
+      notify: restart nginx
+
+    - name: NGINX CONF - Set domain
+      lineinfile:
+        path: "{{ nginx_conf }}"
+        regex: "^[ ]*server_name.*$"
+        line: "{{ nginx_conf_indent }}server_name{{ nginx_conf_tab }}{{ global_servers['main_web_server']['subdomain'] }}.{{ global_domain }};"
+        state: present
+        firstmatch: true
+      notify: restart nginx
+        
+    - name: NGINX CONF - Set root directory
+      lineinfile:
+        path: "{{ nginx_conf }}"
+        regex: "^[ ]*root.*$"
+        line: "{{ nginx_conf_indent }}root{{ nginx_conf_tab }}{{ nginx_web_root }}/;"
+        state: present
+        firstmatch: true
+      notify: restart nginx
+        
+    - name: NGINX CONF - Set index, access log location, and error log location
+      blockinfile:
+        path: "{{ nginx_conf }}"
+        marker: "{{ nginx_conf_indent }}# {mark} ANSIBLE MANAGED BLOCK "
+        insertafter: "^[ ]*root.*$"
+        block: |
+          {{ nginx_conf_indent }}index{{ nginx_conf_tab }}index.php;
+          {{ nginx_conf_indent }}access_log{{ nginx_conf_tab }}{{ nginx_log_root }}/access.log;
+          {{ nginx_conf_indent }}error_log{{ nginx_conf_tab }}{{ nginx_log_root }}/error.log;
+      notify: restart nginx
+
+    - name: NGINX - Copy website from local to server
+      copy:
+        src: "{{ global_local_web_local_files }}"
+        dest: "{{ nginx_web_root }}"
+      notify: restore context
+      
+    - name: NGINX CONF - Add redirect that points the IP to the domain
+      blockinfile:
+        path: "{{ nginx_conf }}"
+        marker: "{{ nginx_conf_tab }}# {mark} ANSIBLE MANAGED BLOCK (REDIRECT)"
+        insertafter: "^[ ]*default_type[ ]*application/octet-stream;$"
+        block: |
+          {{ nginx_conf_tab }}server {
+          {{ nginx_conf_indent }}listen 80;
+          {{ nginx_conf_indent }}server_name {{ global_servers['main_web_server']['ip_address'] }};
+          {{ nginx_conf_indent }}add_header X-Frame-Options "SAMEORIGIN";
+          {{ nginx_conf_indent }}return 301 http://{{ global_servers['main_web_server']['subdomain'] }}.{{ global_domain }}$request_uri;
+          {{ nginx_conf_tab }}}
+      notify: restart nginx
+
+    - name: FIREWALL - Allow http and https
+      firewalld:
+        service: "{{ item.service }}"
+        permanent: yes
+        state: enabled
+      with_items:
+        - service: "http"
+        - service: "https"
+      notify: restart firewall
+      
+    - name: PHP - Change user for process
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^user = apache$"
+        line: "user = nginx"
+      notify: restart php
+        
+    - name: PHP - Change group for process
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^group = apache$"
+        line: "group = nginx"
+      notify: restart php
+        
+    - name: PHP - listen to local socket
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^listen = .*$"
+        line: "listen = /var/run/php-fpm/php-fpm.sock;"
+      notify: restart php
+        
+    - name: PHP - set listen owner
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^[;]*listen.owner = .*$"
+        line: "listen.owner = nginx"
+      notify: restart php
+        
+    - name: PHP - set listen group
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^[;]*listen.group = .*$"
+        line: "listen.group = nginx"
+      notify: restart php
+        
+    - name: PHP - Set listen mode
+      lineinfile:
+        path: "{{ php_conf }}"
+        regex: "^[;]*listen.mode = .*$"
+        line: "listen.mode = 0660"
+      notify: restart php
+      
+    - name: PHP/NGINX - Add PHP block in nginx_conf
+      blockinfile:
+        path: "{{ nginx_conf }}"
+        marker: "{{ nginx_conf_indent }}# {mark} ANSIBLE MANAGED BLOCK (PHP)"
+        insertafter: "[#] END ANSIBLE MANAGED BLOCK "
+        block: |
+          {{ nginx_conf_indent }}location ~ \.php$ {
+          {{ nginx_conf_indent }}{{ nginx_conf_indent }}try_files $uri =404;
+          {{ nginx_conf_indent }}{{ nginx_conf_indent }}fastcgi_pass unix:/var/run/php-fpm/php-fpm.sock;
+          {{ nginx_conf_indent }}{{ nginx_conf_indent }}fastcgi_index index.php;
+          {{ nginx_conf_indent }}{{ nginx_conf_indent }}fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+          {{ nginx_conf_indent }}{{ nginx_conf_indent }}include fastcgi_params;
+          {{ nginx_conf_indent }}}
+      notify: restart nginx
+        
+    - name: PHP - enable and start php-fpm service
+      service:
+        name: php-fpm
+        state: started
+        enabled: true
+    
+    - name: NGINX - enable and start nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: true

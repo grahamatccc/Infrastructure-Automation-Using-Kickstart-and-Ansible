@@ -1,0 +1,100 @@
+---
+- hosts: kvm
+  become: yes
+  
+  vars_files:
+    - global_vars.yml
+
+  tasks:
+    - name: Start and enable libvirtd service
+      service:
+        name: libvirtd
+        state: started
+        enabled: true
+        
+    - name: Firewall - Stopped - WORKAROUND!
+      service:
+        name: firewalld
+        state: stopped
+  
+    - name: NGINX - start the nginx service. Hosts the kickstart file.
+      service:
+        name: nginx
+        state: started
+  
+    - name: Get VMs list
+      virt:
+        command: list_vms
+      register: existing_vms
+      changed_when: no
+      
+    - name: Build list of client names
+      set_fact:
+        client_list: "{{ client_list | default([]) + ['client-%s' | format(item)] }}"
+      loop: "{{ range(1,(global_num_of_clients+1)) | list }}"
+      
+    - name: Create VM if it does not exists
+      block:
+        - name: Create VM
+          command: |
+            sudo virt-install --name {{ item }} \
+            --ram {{ global_client_ram_mb }} \
+            --vcpus {{ global_client_vcpus }} \
+            --disk path={{ global_vm_pool_dir }}/{{ item }}.qcow2,size={{ global_client_disk_gb }} \
+            --os-variant "{{ global_client_os }}" \
+            --graphics=vnc \
+            --location {{ global_vm_pool_dir }}/{{ global_client_iso }} \
+            --network=bridge:{{ global_vm_builtin_bridge }} \
+            --noautoconsole \
+            --wait=-1 \
+            --extra-args="inst.ks=http://{{ ansible_facts[global_vm_builtin_bridge]['ipv4']['address'] }}/{{ global_client_kickstart_path }}"
+          loop: "{{ client_list }}"
+          when: "item not in existing_vms.list_vms"
+          
+    - name: Check that all VMs are running
+      virt:
+        name: "{{ item }}"
+        state: running
+      register: vm_start_results
+      loop: "{{ client_list }}"
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: Edit bridges for the VMs to be the main network one
+      command: "virt-xml {{ item }} --edit --network bridge={{ global_vm_bridge }}"
+      loop: "{{ client_list }}"
+      
+    - name: Shutdown VMs
+      command: "virsh shutdown {{ item }}"
+      loop: "{{ client_list }}"
+      
+    - name: Ensure all VMs are stopped
+      virt:
+        name: "{{ item }}"
+        state: shutdown
+      register: vm_start_results
+      loop: "{{ client_list }}"
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: Startup VMs again
+      virt:
+        name: "{{ item }}"
+        state: running
+      register: vm_start_results
+      loop: "{{ client_list }}"
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: NGINX - stop the nginx service
+      service:
+        name: nginx
+        state: stopped
+        
+    - name: Firewall - Start - WORKAROUND!
+      service:
+        name: firewalld
+        state: started

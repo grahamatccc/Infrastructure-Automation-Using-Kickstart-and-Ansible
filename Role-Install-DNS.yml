@@ -1,0 +1,208 @@
+---
+- hosts: dns
+  become: yes
+  
+  vars:
+    zone_path: "/var/named/"
+    forward_zone_file: "{{ global_domain }}.zone"
+    reverse_zone_file: "{{ global_reverse_zone_network }}.in-addr.arpa.zone"
+    bind_conf: "/etc/named.conf"
+    bind_conf_indent: "        "
+    bind_zone_conf_indent: "            "
+    bind_zone_conf_ttl: "8h"
+    bind_zone_conf_mname: "{{ global_servers['main_dns_server']['hostname'] }}.{{ global_domain }}."
+    bind_zone_conf_rname: "hostmaster.{{ global_domain }}."
+    bind_zone_conf_serial: "20230516"
+    bind_zone_conf_refresh: "1d"
+    bind_zone_conf_retry: "3h"
+    bind_zone_conf_expire: "3d"
+    bind_zone_conf_minimum: "3h"
+    
+  vars_files:
+    - global_vars.yml
+  
+  handlers:
+    - name: restart bind
+      service:
+        name: named
+        state: restarted
+    - name: restart firewall
+      service:
+        name: firewalld
+        state: restarted
+
+  tasks:
+    - name: INSTALL - Bind packages
+      dnf:
+        name:
+        - "{{ item.pkg }}"
+        state: present
+      with_items:
+        - pkg: bind
+        - pkg: bind-utils
+
+    - name: BIND - Update listen IP
+      lineinfile:
+        path: "{{ bind_conf }}"
+        regexp: ".*listen-on port 53 .*"
+        line: "{{ bind_conf_indent }}listen-on port 53 { 127.0.0.1; {{ global_servers['main_dns_server']['ip_address'] }}; };"
+      notify: restart bind
+    
+    - name: BIND - Allow local network to query
+      lineinfile:
+        path: "{{ bind_conf }}"
+        regexp: "[ ]*allow-query[ ]*{ .* };"
+        line: "{{ bind_conf_indent }}allow-query { localhost; {{ global_network }}/{{ global_netmask_cidr }}; };"
+        state: present
+        firstmatch: true
+      notify: restart bind
+        
+    - name: BIND - Allow recursion from local network
+      lineinfile:
+        path: "{{ bind_conf }}"
+        insertafter: "[ ]*allow-query[ ]*{ .* };"
+        line: "{{ bind_conf_indent }}allow-recursion { localhost; {{ global_network }}/{{ global_netmask_cidr }}; };"
+        firstmatch: true
+      notify: restart bind
+    
+    - name: BIND - Add DNS forwarder
+      lineinfile:
+        path: "{{ bind_conf }}"
+        insertafter: "[ ]*allow-recursion[ ]*{ .* };"
+        line: "{{ bind_conf_indent }}forwarders { {{ global_dns_forwarder_ip }}; };"
+        firstmatch: true
+      notify: restart bind
+        
+    - name: FIREWALL - Allow DNS port through firewall
+      firewalld:
+        service: dns
+        permanent: true
+        state: enabled
+      notify: restart firewall
+      
+    - name: BIND ZONE - Delete file. Gets a fresh slate if this zone already exists.
+      file:
+        path: "{{ zone_path }}{{ forward_zone_file }}"
+        state: absent
+      notify: restart bind
+      
+    - name: BIND ZONE - Create file
+      file:
+        path: "{{ zone_path }}{{ forward_zone_file }}"
+        state: touch
+        mode: "0640"
+        owner: root
+        group: named
+      notify: restart bind
+      
+    - name: BIND FORWARD ZONE - Add TTL, SOA record, and NS record
+      blockinfile:
+        path: "{{ zone_path }}{{ forward_zone_file }}"
+        marker: "; {mark} ANSIBLE MANAGED BLOCK "
+        block: |
+          $TTL {{ bind_zone_conf_ttl }}
+          @ IN SOA {{ bind_zone_conf_mname }} {{ bind_zone_conf_rname }} {{ bind_zone_conf_serial }} {{ bind_zone_conf_refresh }} {{ bind_zone_conf_retry }} {{ bind_zone_conf_expire }} {{ bind_zone_conf_minimum }}
+          {{ bind_zone_conf_indent }}IN NS {{ bind_zone_conf_mname }}
+      notify: restart bind
+      
+    - name: BIND ZONE - Create A records for servers on the network
+      lineinfile:
+        path: "{{ zone_path }}{{ forward_zone_file }}"
+        insertafter: "EOF"
+        line: "{{ item.value.hostname }} IN A {{ item.value.ip_address }}"
+      loop: "{{ global_servers | dict2items }}"
+      notify: restart bind
+      
+    - name: BIND ZONE - Create A records for subdomains
+      lineinfile:
+        path: "{{ zone_path }}{{ forward_zone_file }}"
+        insertafter: "EOF"
+        line: "{{ item.value.subdomain }} IN A {{ item.value.ip_address }}"
+      loop: "{{ global_servers | dict2items }}"
+      when: item.value.subdomain is defined
+      notify: restart bind
+      
+    - name: BIND FORWARD ZONE DEFINITION - Create
+      blockinfile:
+        path: "{{ bind_conf }}"
+        marker: "// {mark} ANSIBLE MANAGED BLOCK (BIND FORWARD ZONE DEFINITION) "
+        block: |
+          zone "{{ global_domain }}" {
+          {{ bind_conf_indent }}type master;
+          {{ bind_conf_indent }}file "{{ forward_zone_file }}";
+          {{ bind_conf_indent }}allow-query { {{ global_network }}/{{ global_netmask_cidr }}; };
+          {{ bind_conf_indent }}allow-transfer { none; };
+          dnssec-policy default;
+          };
+      notify: restart bind
+      
+    - name: BIND REVERSE ZONE DEFINITION - Create
+      blockinfile:
+        path: "{{ bind_conf }}"
+        marker: "// {mark} ANSIBLE MANAGED BLOCK (BIND REVERSE ZONE DEFINITION)"
+        block: |
+          zone "{{ global_reverse_zone_network }}.in-addr.arpa" {
+          {{ bind_conf_indent }}type master;
+          {{ bind_conf_indent }}file "{{ reverse_zone_file }}";
+          {{ bind_conf_indent }}allow-query { {{ global_network }}/{{ global_netmask_cidr }}; };
+          {{ bind_conf_indent }}allow-transfer { none; };
+          dnssec-policy default;
+          };
+      notify: restart bind
+          
+    - name: BIND REVERSE ZONE - Delete file. Gets a fresh slate if this zone already exists.
+      file:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        state: absent
+      notify: restart bind
+      
+    - name: BIND REVERSE ZONE - Create file
+      file:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        state: touch
+        mode: "0640"
+        owner: root
+        group: named
+      notify: restart bind
+      
+    - name: BIND REVERSE ZONE - Add TTL, SOA record, and NS record
+      blockinfile:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        marker: "; {mark} ANSIBLE MANAGED BLOCK "
+        block: |
+          $TTL {{ bind_zone_conf_ttl }}
+          @ IN SOA {{ bind_zone_conf_mname }} {{ bind_zone_conf_rname }} {{ bind_zone_conf_serial }} {{ bind_zone_conf_refresh }} {{ bind_zone_conf_retry }} {{ bind_zone_conf_expire }} {{ bind_zone_conf_minimum }}
+          {{ bind_zone_conf_indent }}IN NS {{ bind_zone_conf_mname }}
+      notify: restart bind
+
+    - name: BIND REVERSE ZONE - Create PTR records for servers on the network
+      lineinfile:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        insertafter: "EOF"
+        line: "{{ item.value.ptr }} IN PTR {{ item.value.hostname }}.{{ global_domain }}."
+      loop: "{{ global_servers | dict2items }}"
+      notify: restart bind
+      
+    - name: BIND REVERSE ZONE - Create PTR records for subdomains
+      lineinfile:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        insertafter: "EOF"
+        line: "{{ item.value.ptr }} IN PTR {{ item.value.subdomain }}.{{ global_domain }}."
+      loop: "{{ global_servers | dict2items }}"
+      when: item.value.subdomain is defined
+      notify: restart bind
+      
+    - name: BIND REVERSE ZONE - Create PTR records for bridge IP
+      lineinfile:
+        path: "{{ zone_path }}{{ reverse_zone_file }}"
+        insertafter: "EOF"
+        line: "{{ item.value.bridge_ip_address_ptr }} IN PTR {{ item.value.hostname }}.{{ global_domain }}."
+      loop: "{{ global_servers | dict2items }}"
+      when: item.value.bridge_ip_address_ptr is defined
+      notify: restart bind
+
+    - name: BIND - Enable named service
+      service:
+        name: named
+        state: started
+        enabled: yes

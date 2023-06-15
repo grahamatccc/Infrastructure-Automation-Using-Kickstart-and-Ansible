@@ -1,0 +1,86 @@
+---
+- hosts: kvm
+  become: yes
+  
+  vars_files:
+    - global_vars.yml
+
+  tasks:
+    - name: Start and enable libvirtd service
+      service:
+        name: libvirtd
+        state: started
+        enabled: true
+        
+    - name: Firewall - Stopped - WORKAROUND!
+      service:
+        name: firewalld
+        state: stopped
+  
+    - name: NGINX - start the nginx service. Hosts the kickstart file.
+      service:
+        name: nginx
+        state: started
+  
+    - name: Get VMs list
+      virt:
+        command: list_vms
+      register: existing_vms
+      changed_when: no
+      
+    - name: Create VM if it does not exists
+      include_tasks: sub_create_vm.yml
+      loop: "{{ global_servers | dict2items }}"
+          
+    - name: Check that all VMs are running
+      virt:
+        name: "{{ item.value.hostname }}"
+        state: running
+      register: vm_start_results
+      loop: "{{ global_servers | dict2items }}"
+      when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: Edit bridges for the VMs to be the main network one
+      command: "virt-xml {{ item.value.hostname }} --edit --network bridge={{ global_vm_bridge }}"
+      loop: "{{ global_servers | dict2items }}"
+      when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      
+    - name: Shutdown VMs
+      command: "virsh shutdown {{ item.value.hostname }}"
+      loop: "{{ global_servers | dict2items }}"
+      when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      
+    - name: Ensure all VMs are stopped
+      virt:
+        name: "{{ item.value.hostname }}"
+        state: shutdown
+      register: vm_start_results
+      loop: "{{ global_servers | dict2items }}"
+      when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: Startup VMs again
+      virt:
+        name: "{{ item.value.hostname }}"
+        state: running
+      register: vm_start_results
+      loop: "{{ global_servers | dict2items }}"
+      when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      until: "vm_start_results is success"
+      retries: 15
+      delay: 2
+      
+    - name: NGINX - stop the nginx service
+      service:
+        name: nginx
+        state: stopped
+        
+    - name: Firewall - Start - WORKAROUND!
+      service:
+        name: firewalld
+        state: started

@@ -1,0 +1,22 @@
+- name: Create VM if it does not exists
+  block:
+    - name: Change IP address in kickstart file
+      lineinfile:
+        path: "/var/www/{{ global_kvm_webroot_dir }}/servers/ks.cfg"
+        regex: "network --activate --bootproto=static --ip=.* --netmask=.* --gateway=.* --nameserver=.* --hostname=.* --device=link"
+        line: "network --activate --bootproto=static --ip={{ item.value.ip_address }} --netmask={{ global_netmask }} --gateway={{ global_gateway }} --nameserver={{ global_dns_forwarder_ip }},{{ global_servers['main_dns_server']['ip_address'] }} --hostname={{ item.value.hostname }}.{{ global_domain }} --device=link"
+        
+    - name: Create VM
+      command: |
+        sudo virt-install --name {{ item.value.hostname }} \
+        --ram {{ item.value.ram }} \
+        --vcpus {{ item.value.vcpu }} \
+        --disk path={{ global_vm_pool_dir }}/{{ item.value.hostname }}.qcow2,size={{ item.value.disk }} \
+        --os-variant "{{ global_server_os }}" \
+        --graphics=vnc \
+        --location {{ global_vm_pool_dir }}/{{ global_server_iso }} \
+        --network=bridge:{{ global_vm_builtin_bridge }} \
+        --noautoconsole \
+        --wait=-1 \
+        --extra-args="inst.ks=http://{{ ansible_facts[global_vm_builtin_bridge]['ipv4']['address'] }}/{{ global_server_kickstart_path }}"
+  when: (item.value.hostname not in existing_vms.list_vms) and (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)

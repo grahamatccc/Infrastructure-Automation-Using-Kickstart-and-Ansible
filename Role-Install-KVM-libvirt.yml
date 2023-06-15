@@ -1,0 +1,90 @@
+---
+- hosts: kvm
+  become: yes
+  
+  vars:
+    # ANSIBLE MANAGED VARS BELOW
+    host_net_ints: "{{ ansible_facts['interfaces'] }}"
+    kvm_conn_nmcli_output: ""
+    kvm_bridge_interface_name_list: ""
+    kvm_bridge_interface_name: ""
+    kvm_bridge_interface_device: ""
+    
+  vars_files:
+    - global_vars.yml
+
+  tasks:
+    - name: Install KVM packages
+      dnf:
+        name:
+        - "{{ item.pkg }}"
+        state: present
+      with_items:
+        - pkg: libvirt
+        - pkg: qemu-kvm
+        - pkg: virt-install
+        - pkg: guestfs-tools
+        - pkg: python3-libvirt
+      
+    - name: KVM - Copy server iso from local to server
+      copy:
+        src: "{{ global_server_iso_path }}"
+        dest: "{{ global_vm_pool_dir }}"
+      
+    - name: KVM - Copy client iso from local to server
+      copy:
+        src: "{{ global_client_iso_path }}"
+        dest: "{{ global_vm_pool_dir }}"
+          
+    - name: NMCLI INT INFO - Get NM active connection list
+      shell: "nmcli -t -f NAME c"
+      register: kvm_bridge_interface_name_list
+      changed_when: no
+          
+    - name: Create bridge interface
+      block:
+        - name: NMCLI INT INFO - Get interface that does not have an IP address but is also active
+          set_fact: 
+            kvm_bridge_interface_device: "{{ ansible_facts[item]['device'] }}"
+          loop: "{{ host_net_ints }}"
+          when: (ansible_facts[item]['ipv4'] is not defined) and (ansible_facts[item]['active'] == true) and (item != "vnet0")
+          changed_when: no
+              
+        - name: NMCLI INT INFO - Get NM connection information for interface
+          shell: "nmcli connection show | grep -i {{ kvm_bridge_interface_device }}"
+          register: kvm_conn_nmcli_output
+          changed_when: no
+              
+        - name: NMCLI INT INFO - Get clean name of network interface
+          set_fact:
+            kvm_bridge_interface_name: "{{ item }}"
+          loop: "{{ kvm_bridge_interface_name_list['stdout_lines'] }}"
+          when: item | string in kvm_conn_nmcli_output['stdout']
+          changed_when: no
+
+        - name: BRIDGE - Create bridge
+          block: 
+            - name: BRIDGE - Create VM bridge interface
+              command: sudo nmcli connection add type bridge autoconnect yes con-name "{{ global_vm_bridge }}" ifname "{{ global_vm_bridge }}"
+                
+            - name: BRIDGE - Set network connection for VM bridge
+              command: sudo nmcli connection modify "{{ global_vm_bridge }}" ipv4.addresses "{{ global_servers['main_kvm_server']['bridge_ip_address'] }}"/"{{ global_netmask_cidr }}" gw4 "{{ global_gateway }}" ipv4.method manual
+                
+            - name: BRIDGE - Set DNS for VM bridge
+              command: sudo nmcli connection modify "{{ global_vm_bridge }}" ipv4.dns "{{ global_dns_forwarder_ip }}"
+                
+            - name: BRIDGE - Delete the chosen interface
+              command: sudo nmcli connection del "{{ kvm_bridge_interface_name }}"
+                
+            - name: BRIDGE - Attach chosen interface to VM bridge
+              command: sudo nmcli connection add type bridge-slave autoconnect yes con-name "{{ kvm_bridge_interface_device }}" ifname "{{ kvm_bridge_interface_device }}" master "{{ global_vm_bridge }}"
+                
+            - name: BRIDGE - Bring the VM bridge interface up
+              command: sudo nmcli connection up "{{ global_vm_bridge }}"
+          when: global_vm_bridge | string not in kvm_bridge_interface_name_list['stdout']
+          
+        - name: Start and enable libvirtd service
+          service:
+            name: libvirtd
+            state: started
+            enabled: true

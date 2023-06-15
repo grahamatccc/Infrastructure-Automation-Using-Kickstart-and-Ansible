@@ -1,0 +1,84 @@
+---
+# Mysql admin and ssh user
+global_admin_username: "testuser"
+
+# Red Hat Registration
+global_rhel_activation_key: "Filler"
+global_rhel_org_id: "1234567890"
+
+# Networking information
+global_domain: "capstone.lan"
+global_vm_bridge: "kvmbr0"
+global_vm_builtin_bridge: "virbr0"
+global_network: "172.16.0.0"
+global_netmask: "255.255.255.0"
+global_netmask_cidr: "24"
+global_gateway: "172.16.0.1"
+global_broadcast: "172.16.0.255"
+
+# DNS info
+global_reverse_zone_network: "0.16.172"
+global_dns_forwarder_ip: "1.1.1.1"
+
+# DHCP Range
+global_dhcp_range_start: "172.16.0.100"
+global_dchp_range_end: "172.16.0.200"
+
+# Information for all of the servers. Used to create VMs, configure VMs, and create DNS records
+global_servers:
+  main_kvm_server:
+    hostname: "prod-kvm-01"
+    ip_address: "172.16.0.2"
+    ptr: "2"
+    bridge_ip_address: "172.16.0.3"
+    bridge_ip_address_ptr: "3"
+  main_dns_server:
+    hostname: "prod-dns-01"
+    ip_address: "172.16.0.4"
+    ptr: "4"
+    vcpu: "2"
+    ram: "4096"
+    disk: "20"
+  main_dhcp_server:
+    hostname: "prod-dhcp-01"
+    ip_address: "172.16.0.5"
+    ptr: "5"
+    vcpu: "2"
+    ram: "4096"
+    disk: "20"
+  main_web_server:
+    hostname: "prod-web-01"
+    subdomain: "www"
+    ip_address: "172.16.0.6"
+    ptr: "6"
+    vcpu: "2"
+    ram: "4096"
+    disk: "20"
+
+# General VM creation informati9on
+global_kickstart_location: "http://{{ global_servers['main_kvm_server']['ip_address'] }}"
+global_vm_pool_dir: "/var/lib/libvirt/images"
+global_kickstart_local_dir: "Resources/kickstart/"
+global_server_kickstart_path: "servers/ks.cfg"
+global_client_kickstart_path: "clients/ks.cfg"
+
+# Server VM creation information
+global_server_os: "rhel9.1"
+global_server_iso: "rhel-baseos-9.1-x86_64-dvd.iso"
+global_server_iso_path: "Resources/iso/{{ global_server_iso }}"
+global_kvm_webroot_dir: "kickstart"
+
+# Client VM creation information
+global_num_of_clients: 2
+global_client_ram_mb: "2048"
+global_client_vcpus: "2"
+global_client_disk_gb: "20"
+global_client_os: "rhel9.1"
+global_client_iso: "rhel-baseos-9.1-x86_64-dvd.iso"
+global_client_iso_path: "Resources/iso/{{ global_client_iso }}"
+
+# Website setup
+global_local_web_local_files: "Resources/website/webroot/"
+global_mysql_dump_file: "capstone_database.sql"
+global_mysql_dump_file_local_path: "Resources/website/database/{{ global_mysql_dump_file }}"
+global_mysql_new_dump_local_storage: "Resources/website/dumps/"

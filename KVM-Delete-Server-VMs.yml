@@ -1,0 +1,32 @@
+---
+- hosts: kvm
+  become: yes
+    
+  vars_files:
+    - global_vars.yml
+
+  tasks:
+  - name: Get VMs list
+    virt:
+      command: list_vms
+    register: existing_vms
+    changed_when: no
+  
+  - name: Delete VM if it exists
+    block:
+      - name: Force shutdown VMs
+        command: "virsh destroy {{ item.value.hostname }}"
+        loop: "{{ global_servers | dict2items }}"
+        when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+        
+      - name: Delete VMs
+        command: "virsh undefine {{ item.value.hostname }}"
+        loop: "{{ global_servers | dict2items }}"
+        when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+        
+      - name: Delete VM disks
+        command: "rm {{ global_vm_pool_dir }}/{{ item.value.hostname }}.qcow2"
+        loop: "{{ global_servers | dict2items }}"
+        when: (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+    when: (item.value.hostname in existing_vms.list_vms) and (item.value.vcpu is defined) and (item.value.ram is defined) and (item.value.disk is defined)
+      

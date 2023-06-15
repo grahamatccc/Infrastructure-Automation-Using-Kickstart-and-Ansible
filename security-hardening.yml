@@ -1,0 +1,93 @@
+---
+- hosts: all
+  become: yes
+  
+  vars_files:
+    - global_vars.yml
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: sshd
+        state: restarted
+
+  tasks:
+    - name: Updates - Apply all
+      dnf:
+        name: "*"
+        state: latest
+
+    - name: Updates - restart server
+      reboot:
+        reboot_timeout: 3600
+
+    - name: Disable root user
+      lineinfile:
+        path: /etc/passwd
+        regexp: 'root:x:0:0:root:/root:/bin/bash'
+        line: root:x:0:0:root:/root:/sbin/nologin
+
+    - name: SSH - Create ssh_users group that'll allow users to SSH into the server
+      group:
+        name: ssh_users
+        state: present
+
+    - name: SSH - Add my user to ssh_users group
+      user:
+        name: "{{ global_admin_username }}"
+        groups: ssh_users
+        append: true
+
+    - name: SSH - Disable normal password auth
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\#PasswordAuthentication yes'
+        line: PasswordAuthentication no
+      notify: restart ssh
+
+    - name: SSH - Disable empty passwords
+      lineinfile: 
+        path: /etc/ssh/sshd_config
+        regexp: 'PermitEmptyPasswords *'
+        line: PermitEmptyPasswords no
+      notify: restart ssh
+
+    - name: SSH - Disable root login
+      lineinfile: 
+        path: /etc/ssh/sshd_config
+        regexp: '^\#PermitRootLogin *'
+        line: PermitRootLogin no
+      notify: restart ssh
+
+    - name: SSH - Disable X11 forwarding
+      lineinfile: 
+        path: /etc/ssh/sshd_config
+        regexp: '^\#X11Forwarding *'
+        line: X11Forwarding no
+      notify: restart ssh
+
+    - name: SSH - Set to SSH protocol 2
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: Protocol 2
+      notify: restart ssh
+
+    - name: SSH - Allow only users of ssh_users to use SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: AllowGroups ssh_users
+      notify: restart ssh
+
+    - name: SSH - Change max idle time to 5 minutes
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\#ClientAliveInterval *'
+        line: ClientAliveInterval 300
+      notify: restart ssh
+
+    - name: SSH - Change max alive messages == 2
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\#ClientAliveCountMax *'
+        line: ClientAliveCountMax 2
+      notify: restart ssh

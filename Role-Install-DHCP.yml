@@ -1,0 +1,59 @@
+---
+- hosts: dhcp
+  become: yes
+
+  vars:
+    dhcp_conf: "/etc/dhcp/dhcpd.conf"
+    default_lease_time: "600"
+    max_lease_time: "7200"
+    dhcp_conf_indent: "    "
+  
+  vars_files:
+    - global_vars.yml
+    
+  handlers:
+    - name: restart dhcpd
+      service:
+        name: dhcpd
+        state: restarted
+    - name: restart firewall
+      service:
+        name: firewalld
+        state: restarted
+
+  tasks:
+    - name: Install DHCP server package
+      dnf:
+        name: dhcp-server
+        state: present
+    
+    - name: DHCP - Create
+      blockinfile:
+        path: "{{ dhcp_conf }}"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK "
+        block: |
+          option domain-name "{{ global_domain }}";
+          option domain-name-servers {{ global_servers['main_dns_server']['ip_address'] }};
+          authoritative;
+          default-lease-time {{ default_lease_time }};
+          max-lease-time {{ max_lease_time }};
+
+          subnet {{ global_network }} netmask {{ global_netmask }} {
+          {{ dhcp_conf_indent }}range dynamic-bootp {{ global_dhcp_range_start }} {{ global_dchp_range_end }};
+          {{ dhcp_conf_indent }}option broadcast-address {{ global_broadcast }};
+          {{ dhcp_conf_indent }}option routers {{ global_gateway }};
+          }
+      notify: restart dhcpd
+    
+    - name: FIREWALL - Allow DHCP port through firewall
+      firewalld:
+        service: dhcp
+        permanent: true
+        state: enabled
+      notify: restart firewall
+
+    - name: Start and enable dhcpd
+      service:
+        name: dhcpd
+        state: started
+        enabled: yes

@@ -1,0 +1,28 @@
+---
+- hosts: kvm
+  become: yes
+
+  tasks:
+    - name: Get running VMs list
+      virt:
+        command: list_vms
+        state: running
+      register: existing_vms
+      changed_when: no
+      
+    - name: Get VNC port
+      command: virsh vncdisplay "{{ item }}"
+      loop: "{{ existing_vms.list_vms }}"
+      register: virsh_output
+      changed_when: no
+      
+    - name: Create dictionary of ports
+      set_fact:
+        vnc_ports: "{{ vnc_ports|default({}) | combine( {item['item']: item['stdout'].split(':').1|int + 5900} ) }}"
+      loop: "{{ virsh_output['results'] }}"
+      changed_when: no
+    
+    - name: Display contents of dictionary
+      debug:
+        msg: "{{ item.key }} - {{ item.value }}"
+      loop: "{{ vnc_ports | dict2items }}"

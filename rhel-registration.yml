@@ -1,0 +1,14 @@
+---
+- hosts: all
+  become: yes
+  
+  vars_files:
+    - global_vars.yml
+
+  tasks:
+    - name: Register/ensure all servers are registered with Red Hat
+      redhat_subscription:
+        state: present
+        activationkey: "{{ global_rhel_activation_key }}"
+        org_id: "{{ global_rhel_org_id }}"
+      

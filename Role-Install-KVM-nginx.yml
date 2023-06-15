@@ -1,0 +1,130 @@
+---
+- hosts: kvm
+  become: yes
+  
+  vars:
+    # ANSIBLE MANAGED VARS BELOW
+    nginx_conf: "/etc/nginx/nginx.conf"
+    nginx_web_root: "/var/www/{{ global_kvm_webroot_dir }}"
+    nginx_log_root: "/var/log/nginx/{{ global_kvm_webroot_dir }}"
+    nginx_conf_indent: "        "
+    nginx_conf_tab: "       "
+    
+  vars_files:
+    - global_vars.yml
+    
+  handlers:
+    - name: restart firewall
+      service:
+        name: firewalld
+        state: restarted
+        
+    - name: restore context
+      shell:
+        cmd: "restorecon -Rv {{ nginx_web_root }}/"
+
+  tasks:
+    - name: Install and configure nginx
+      block:
+        - name: INSTALL - Nginx and tool for managing SELinux
+          dnf:
+            name: "{{ item.pkg }}"
+            state: present
+          with_items:
+            - pkg: "nginx"
+            - pkg: "policycoreutils-python-utils"
+            
+        - name: NGINX - Create root dir for domain
+          file:
+            path: "{{ nginx_web_root }}/"
+            state: directory
+            mode: 0755
+            owner: root
+            group: root
+          
+        - name: NGINX - Create log dir for domain
+          file:
+            path: "{{ nginx_log_root }}/"
+            state: directory
+            mode: 0755
+            owner: root
+            group: root
+          
+        - name: SELINUX - Set httpd_sys_content_t for nginx_web_root
+          sefcontext:
+            target: "{{ nginx_web_root }}(/.*)?"
+            ftype: a
+            setype: httpd_sys_content_t
+          notify: restore context
+          
+        - name: NGINX CONF - Change listen port IP address
+          lineinfile:
+            path: "{{ nginx_conf }}"
+            regex: "^[ ]*listen[ ]*.*:80;$"
+            line: "{{ nginx_conf_indent }}listen{{ nginx_conf_tab }}{{ ansible_facts[global_vm_builtin_bridge]['ipv4']['address'] }}:80;"
+            state: present
+            firstmatch: true
+          
+        - name: NGINX CONF - Disable IPv6
+          lineinfile:
+            path: "{{ nginx_conf }}"
+            regex: "^[ ]*listen[ ]*[[]::[]]:80;$"
+            line: "{{ nginx_conf_indent }}#listen{{ nginx_conf_tab }}[::]:80;"
+            state: present
+            firstmatch: true
+          
+        - name: NGINX CONF - Set IP as domain
+          lineinfile:
+            path: "{{ nginx_conf }}"
+            regex: "^[ ]*server_name.*$"
+            line: "{{ nginx_conf_indent }}server_name{{ nginx_conf_tab }}{{ ansible_facts[global_vm_builtin_bridge]['ipv4']['address'] }};"
+            state: present
+            firstmatch: true
+          
+        - name: NGINX CONF - Set root directory
+          lineinfile:
+            path: "{{ nginx_conf }}"
+            regex: "^[ ]*root.*$"
+            line: "{{ nginx_conf_indent }}root{{ nginx_conf_tab }}{{ nginx_web_root }}/;"
+            state: present
+            firstmatch: true
+          
+        - name: NGINX CONF - Set index, access log location, and error log location
+          blockinfile:
+            path: "{{ nginx_conf }}"
+            marker: "{{ nginx_conf_indent }}# {mark} ANSIBLE MANAGED BLOCK "
+            insertafter: "^[ ]*root.*$"
+            block: |
+              {{ nginx_conf_indent }}index{{ nginx_conf_tab }}index.html;
+              {{ nginx_conf_indent }}access_log{{ nginx_conf_tab }}{{ nginx_log_root }}/access.log;
+              {{ nginx_conf_indent }}error_log{{ nginx_conf_tab }}{{ nginx_log_root }}/error.log;
+          
+        - name: NGINX - Copy kickstart directory from local to server
+          copy:
+            src: "{{ global_kickstart_local_dir }}"
+            dest: "{{ nginx_web_root }}"
+          notify: restore context
+          
+        - name: FIREWALL - Move virtual interface to internal firewall zone
+          firewalld:
+            interface: "{{ global_vm_builtin_bridge }}"
+            zone: internal
+            permanent: yes
+            state: enabled
+          notify: restart firewall
+          
+        - name: FIREWALL - Allow http for internal zone
+          firewalld:
+            service: http
+            zone: internal
+            permanent: yes
+            state: enabled
+          notify: restart firewall
+          
+        - name: FIREWALL - Allow DHCP for internal zone
+          firewalld:
+            service: dhcp
+            zone: internal
+            permanent: yes
+            state: enabled
+          notify: restart firewall
